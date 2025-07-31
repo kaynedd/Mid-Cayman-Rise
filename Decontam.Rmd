@@ -1,0 +1,170 @@
+---
+title: "Decontam_19June2025"
+author: "Kayla A. Nedd"
+date: "2025-06-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#Import file
+deepsea_18S_merged_asv <- read.delim("~/Documents/GitHub/MCR_Updated_Data/deepsea-18s-merged-asv-table-05022025.tsv", header = TRUE, sep = "\t", skip = 1) 
+deepsea_18S_PR2_tax <- read.delim("~/Documents/GitHub/MCR_Updated_Data/taxonomy_PR2.tsv")
+metadata <- read.csv("~/Documents/GitHub/microeuk-amplicon-survey/data-input/samplelist-metadata.csv")
+```
+
+```{r}
+deepsea_18S_asv_wtax <- deepsea_18S_merged_asv %>% 
+  select(Feature.ID = 'X.OTU.ID', everything()) %>% 
+  pivot_longer(cols = !Feature.ID, 
+               names_to = "SAMPLE", values_to = "value")%>% 
+  left_join(deepsea_18S_PR2_tax, by = c("Feature.ID" = "Feature.ID")) %>% 
+  separate(Taxon, c("Domain", "Supergroup",
+                    "Phylum", "Class", "Order",
+                    "Family", "Genus", "Species"), sep = ";", remove = FALSE) %>% 
+  filter(value > 0)
+```
+
+```{r}
+metadata <- metadata %>% 
+  mutate(DATASET = case_when(
+    grepl("_GR_", SAMPLE) ~ "GR",
+    grepl("Gorda", SAMPLE) ~ "GR",
+    grepl("_MCR_", SAMPLE) ~ "MCR",
+    grepl("Axial", SAMPLE) ~ "Axial"))
+```
+
+```{r}
+deepsea_18S_asv_wtax$SAMPLE <- gsub("X", "", deepsea_18S_asv_wtax$SAMPLE)
+deepsea_18S_asv_wtax$SAMPLE <- gsub("AIAL", "AXIAL", deepsea_18S_asv_wtax$SAMPLE)
+```
+
+```{r}
+#Save files to cluster
+write.table(deepsea_18S_asv_wtax, "~/Documents/GitHub/MCR_Updated_Data/deepsea_18S_asv_wtax", sep = "\t", row.names = FALSE, quote = FALSE)
+
+df_deepsea_18S_asv_wtax <- read.delim("~/Documents/GitHub/MCR_Updated_Data/deepsea_18S_asv_wtax", header = TRUE, sep = "\t")
+```
+
+```{r}
+deepsea_18S_compiled <- df_deepsea_18S_asv_wtax %>% 
+  mutate(sample_or_control = case_when(
+    grepl("Control", SAMPLE, ignore.case = TRUE) ~ "control",
+    TRUE ~ "Sample")) %>% 
+  left_join(metadata, by = c("SAMPLE" = "SAMPLE"))
+```
+
+```{r}
+#Import datasets as phyloseq objects
+tax_matrix <- deepsea_18S_compiled %>% select(Feature.ID, Domain, Supergroup, 
+                                            Phylum, Class, Order, Family, Genus, Species) %>% 
+  distinct() %>% column_to_rownames(var = "Feature.ID") %>% as.matrix
+
+asv_matrix <- deepsea_18S_compiled %>% select(Feature.ID, SAMPLE, value) %>% 
+  pivot_wider(names_from = "SAMPLE", values_fill = 0, values_from = value) %>% 
+  column_to_rownames(var = "Feature.ID") %>% as.matrix
+
+rownames(tax_matrix) <- row.names(asv_matrix)
+
+deepsea_metadata_cones <- deepsea_18S_compiled %>% 
+  select(SAMPLE, Type, VENT, SITE, SAMPLETYPE, sample_or_control) %>% 
+  distinct() %>%  column_to_rownames(var = "SAMPLE")
+
+```
+
+```{r}
+#Import asv and tax matrices
+ASV = otu_table(asv_matrix, taxa_are_rows = TRUE)
+TAX = tax_table(tax_matrix)
+phylo_obj <- phyloseq(ASV, TAX)
+```
+
+```{r}
+#Import metadata as sample data in phyloseq
+samplenames <- sample_data(deepsea_metadata_cones)
+
+#Join as phyloseq object
+physeq_wnames = merge_phyloseq(phylo_obj, samplenames)
+```
+
+```{r}
+#Identify contaminant ASVs
+# When "Control" appears in "Sample_or_Control column, this is a negative control"
+sample_data(physeq_wnames)$is.neg <- sample_data(physeq_wnames)$sample_or_control == "control"
+```
+
+```{r}
+#ID contaminants using Prevalence information
+contam_prev <- isContaminant(physeq_wnames, 
+                             method="prevalence", 
+                             neg="is.neg", 
+                             threshold = 0.5, normalize = TRUE) 
+```
+
+```{r}
+# Report number of ASVs IDed as contamintants
+table(contam_prev$contaminant)
+#FALSE 26650 TRUE 909
+```
+
+```{r}
+##Remove problematic ASVs
+#Subset contaminant ASVs
+contams <- filter(contam_prev, contaminant == "TRUE")
+list_of_contam_asvs <- as.character(row.names(contams))
+
+taxa_contam <- as.data.frame(tax_matrix) %>% 
+  rownames_to_column(var = "Feature.ID") %>% 
+  filter(Feature.ID %in% list_of_contam_asvs)
+```
+
+```{r}
+#View
+deepsea_asv_wtax_decon <- deepsea_18S_compiled %>% 
+  filter(!(Feature.ID %in% list_of_contam_asvs)) %>% 
+  filter(!(sample_or_control == "control"))
+
+tmp_orig <- (deepsea_18S_compiled %>% filter(!(sample_or_control == "control")))
+```
+
+```{r}
+#Stats on lost ASVs
+x <- length(unique(tmp_orig$Feature.ID)); x
+y <- length(unique(deepsea_asv_wtax_decon$Feature.ID)); y
+100*((y-x)/x) #5.3% of ASVs lost
+a <- sum(tmp_orig$value);a #6.67 million
+b <- sum(deepsea_asv_wtax_decon$value);b #5.71 million 
+100*((b-a)/a)
+# Lost 14.5% of sequences from whole dataset.
+## Subsample to clean ASVs
+deepsea_asv_wtax_wstats <- deepsea_18S_compiled %>% 
+  mutate(DECONTAM = case_when(
+    Feature.ID %in% list_of_contam_asvs ~ "FAIL",
+    TRUE ~ "PASS"
+  ))
+```
+
+```{r}
+deepsea_18S_asv_FinalProduct <- deepsea_asv_wtax_wstats %>% 
+  filter(sample_or_control == "Sample") %>% 
+  filter(DECONTAM == "PASS") %>% 
+  select(SAMPLE, Feature.ID, SEQUENCE_COUNT = value, Taxon, Domain,
+         Supergroup, Phylum, Class, Order, Family, Genus, Species, VENT, COORDINATES, SITE, SAMPLEID, SAMPLETYPE, DEPTH, TEMP, pH, Perc, Mg, H2., H2S, CH4, ProkConc, DATASET)
+```
+
+```{r}
+save(deepsea_18S_asv_FinalProduct, file = "~/Documents/GitHub/MCR_Updated_Data/deepsea_18S_asv_FinalProduct.RData")
+```
+
+```{r}
+#write.csv(deepsea_18S_asv_FinalProduct, file = "~/Documents/GitHub/MCR_Updated_Data/deepsea_18S_asv_FinalProduct.", row.names = FALSE)
+```
+
+```{r}
+
+```
+

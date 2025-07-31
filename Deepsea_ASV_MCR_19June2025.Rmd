@@ -1,0 +1,889 @@
+---
+title: "Deepsea_ASV_MCR_19June2025"
+author: "Kayla A. Nedd"
+date: "2025-06-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(tibble)
+library(lattice)
+library(paletteer)
+library(phyloseq)
+#library(pheatmap)
+library(vegan)
+```
+
+```{r}
+load("~/Documents/GitHub/MCR_Updated_Data/deepsea_18S_asv_FinalProduct.RData", verbose = TRUE)
+
+deepsea_18S_asv_FinalProduct
+
+deepsea_metadata <- read.delim("~/Documents/GitHub/microeuk-amplicon-survey/data-input/samplelist-metadata.txt", na.strings = "")
+```
+
+```{r}
+df_fixed <- deepsea_18S_asv_FinalProduct %>% 
+rename(FeatureID = `Feature.ID`) %>% 
+ rename(value = `SEQUENCE_COUNT`) %>% 
+  rename(H2 = `H2.`)
+
+```
+
+
+```{r}
+new_MCR <- df_fixed %>% 
+  filter(DATASET == "MCR") %>% 
+  filter(Supergroup != "Terrabacteria") %>% 
+  filter(Supergroup != "Archaea_X") %>% 
+  filter(Supergroup != "Bacteria_X") %>% 
+  filter(Supergroup != "CMS") %>% 
+  filter(Supergroup != "FCB") %>% 
+  filter(Phylum != "Aquificae") %>% 
+  filter(Phylum != "Euryarchaeota") %>% #has methanogens, acidophiles and thermophiles
+  filter(Phylum != "Proteobacteria") %>% 
+  filter(Type != "expTf") %>% 
+  mutate(Species_Annotation = ifelse(is.na(Species), "Unknown_Annotation", Species))
+```
+
+```{r}
+new_MCR_taxon <- new_MCR %>% 
+  select(FeatureID,Taxon, Domain, Supergroup, Phylum, Class, Order, Family, Genus, Species) %>%   distinct()
+
+length(unique(new_MCR_taxon$FeatureID))
+length(new_MCR_taxon$FeatureID)
+```
+
+```{r}
+new_df_w_site <- df <- new_MCR %>% 
+  select(FeatureID, SAMPLE, value, SAMPLETYPE, SITE, VENT, COORDINATES) %>% 
+pivot_wider(names_from = SAMPLETYPE, values_from = value, values_fill = NA) %>% 
+mutate(Vent_endemic = case_when((Vent > 0 & is.na(Plume) & is.na(Background))  ~ "putatively_endemic")) %>% 
+drop_na(Vent_endemic)
+
+length(new_df_w_site$FeatureID)
+```
+
+# Comnbine dataframes into one
+```{r}
+new_endem_taxa <- new_df_w_site %>% left_join(new_MCR_taxon) %>% 
+  mutate(Species_Annotation = ifelse(is.na(Species), "Unknown_Annotation", Species))
+
+length(new_endem_taxa$FeatureID)
+```
+
+# Fine scale distance
+```{r}
+endem_coordinates <- new_endem_taxa %>%
+  separate(COORDINATES, into = c("Latitude", "Longitude"), sep = ", ", convert = TRUE) %>% 
+  group_by(SAMPLE, Latitude, Longitude, VENT) %>%
+  summarise(avg_value = mean(Vent, na.rm = TRUE)) %>% 
+  group_by(Latitude, Longitude)
+
+  
+
+#install.packages("geosphere")
+library(geosphere)
+
+  
+
+endem_coords <- endem_coordinates %>% select(Longitude, Latitude, VENT)
+
+coords_matrix <- endem_coords %>%
+  select(Longitude, Latitude) %>%
+  as.matrix()
+
+
+fine_scale_distance_matrix <- distm(coords_matrix, fun = distHaversine)
+
+endem_coords$VENT <- make.unique(as.character(endem_coords$VENT))
+
+#rownames(fine_scale_distance_matrix) <- endem_coords$VENT
+#colnames(fine_scale_distance_matrix) <- endem_coords$VENT
+
+print(fine_scale_distance_matrix)
+
+#rownames(as.data.frame(as.matrix(fine_scale_distance_matrix)))
+#head(as.data.frame(as.matrix(fine_scale_distance_matrix)))
+
+```
+
+
+
+```{r}
+fine_scale_dist <- (as.data.frame(as.matrix(fine_scale_distance_matrix)))
+```
+
+
+```{r}
+rownames(as.data.frame(as.matrix(fine_scale_dist)))
+head(as.data.frame(as.matrix(fine_scale_dist)))
+```
+
+```{r}
+fs_dist_long <- (as.data.frame(as.matrix(fine_scale_dist))) %>% 
+  rownames_to_column(var = "VENT") %>% 
+    pivot_longer(
+    cols = -VENT,         # keep SampleID as the row identifier (this becomes Sample1)
+    names_to = "VENT_B",     # the column names become Sample2
+    values_to = "Distance" # the values go into this new column
+  ) %>%
+  rename(VENT_A = VENT)
+ 
+```
+
+
+```{r}
+ggplot(fs_dist_long, aes(x = VENT_A, y = VENT_B, fill = Distance)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Pairwise Fine Scale Distance Comparison", x = "", y = "") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+```{r}
+ggplot(fine_scale_dist, aes(x = VENT_A, y = VENT_B, fill = Distance, size = Distance)) +
+  geom_point(shape = 21, color = "black") + scale_x_discrete(position = "top") +
+  scale_fill_viridis_c() + theme(axis.text.x = element_text(angle = 90, hjust = 1.0)) + theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray"),
+    panel.grid.minor = element_line(color = "gray")
+  ) + labs(title = "Fine Scale Distance") +
+scale_fill_stepsn(colors = red_darkred, breaks = c(0.2, 0.4, 0.6, 0.8, 1)) 
+```
+
+
+# Export table of Putatively Endemic Taxa
+```{r}
+write.csv(new_endem_taxa, file = "~/Documents/GitHub/MCR_Updated_Data/New_Putatively_Endem_Taxa.csv")
+```
+
+# Import data into R
+```{r}
+new_endemic_taxa_table <- read_csv("~/Documents/GitHub/MCR_Updated_Data/New_Putatively_Endem_Taxa.csv")
+```
+
+```{r}
+length(unique(table(new_endemic_taxa_table$Supergroup)))
+```
+
+# Number of ASVs and Sequences for everything both endemic and cosmopolitan
+```{r}
+new_Supergroup_MCR <- new_MCR %>% 
+  group_by(Supergroup) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+```
+
+# Export Supergroup Table
+```{r}
+write.csv(new_Supergroup_MCR, file = "~/Documents/GitHub/MCR_Updated_Data/Supergroup_Everything.csv")
+```
+
+
+# Table of total asvs and seqs for everything at MCR
+```{r}
+new_Everything <- new_MCR %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE)
+
+new_Everything_level <- new_Everything %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+```
+
+# Breakdown by Phylum for Observashs
+
+# Amoebozoa
+```{r}
+new_Amoebozoa_all <- new_MCR %>% 
+  filter(Supergroup == "Amoebozoa") %>% 
+ tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(new_Amoebozoa_all, file = "~/Documents/GitHub/MCR_Updated_Data/new_Amoebozoa_All_by_level.csv")
+```
+
+
+```{r}
+new_Amoebozoa_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Amoebozoa") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(new_Amoebozoa_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/new_Amoebozoa_Putatively_Endemic_by_level.csv")
+```
+
+Observations: No change in the number of asvs and seqs for Breviatea_Breviatea_X and Conosa:_Mycetozoa-Myxogastrea between everything vs endemic. Lobosa_Lobosa-G1 is missing from the putatively endemic table.
+
+# Archaeplastida 
+```{r}
+new_Archaeplastida_all <- new_MCR %>% 
+  filter(Supergroup == "Archaeplastida") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(new_Archaeplastida_all, file = "~/Documents/GitHub/MCR_Updated_Data/new_Archaeplastida_All_by_level.csv")
+```
+
+
+```{r}
+new_Archaeplastida_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Archaeplastida") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(new_Archaeplastida_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/new_Archaeplastida_Putatively_Endemic_by_level.csv")
+```
+
+# CRuMs
+```{r}
+CRuMs_all <- new_MCR %>% 
+  filter(Supergroup == "CRuMs") %>% 
+ tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(CRuMs_all, file = "~/Documents/GitHub/MCR_Updated_Data/CRuMs_All_by_level.csv")
+```
+
+
+```{r}
+CRuMs_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "CRuMs") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(CRuMs_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/CRuMs_Putatively_Endemic_by_level.csv")
+```
+
+# Cryptista
+```{r}
+Cryptista_all <- new_MCR %>% 
+  filter(Supergroup == "Cryptista") %>% 
+ tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(Cryptista_all, file = "~/Documents/GitHub/MCR_Updated_Data/Cryptista_All_by_level.csv")
+```
+
+
+```{r}
+Cryptista_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Cryptista") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(Cryptista_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Cryptista_Putatively_Endemic_by_level.csv")
+```
+
+# Eukaryota_X
+```{r}
+Eukaryota_X_all <- new_MCR %>% 
+  filter(Supergroup == "Eukaryota_X") %>% 
+ tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(Eukaryota_X_all, file = "~/Documents/GitHub/MCR_Updated_Data/Eukaryota_X_All_by_level.csv")
+```
+
+
+```{r}
+Eukaryota_X_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Eukaryota_X") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(Eukaryota_X_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Eukaryota_X_Putatively_Endemic_by_level.csv")
+```
+
+# Excavata
+```{r}
+new_Excavata_all <- new_MCR %>% 
+  filter(Supergroup == "Excavata") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(new_Excavata_all, file = "~/Documents/GitHub/MCR_Updated_Data/new_Excavata_All_by_level.csv")
+```
+
+
+```{r}
+new_Excavata_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Excavata") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(new_Excavata_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Excavata_Putatively_Endemic_by_level.csv")
+```
+Consistent Phylum_Class level annotation between everything vs endemic
+Discoba_Discoba_XX 12 asvs 291 seqs in everything
+                    11 asvs 286 seqs in endemic
+                    1 asv 5 seqs not found at the vent
+
+# Haptista
+```{r}
+Haptista_all <- new_MCR %>% 
+  filter(Supergroup == "Haptista") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(Haptista_all, file = "~/Documents/GitHub/MCR_Updated_Data/Haptista_All_by_level.csv")
+```
+
+```{r}
+Haptista_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Haptista") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(Haptista_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Haptista_Putatively_Endemic_by_level.csv")
+```
+Observations: No change for 1 phylum Haptophyta_Haptophyta_Clade_HAP3 in number of asvs and seqs
+2 Phylum_Class missing form endemic: Haptophyta_Pavlovophyceae and Hacrobia_NA
+
+Katablepharidophyta_Katablepharidaceae 14 asvs 223 seqs in everything
+                                       12 asvs 209 seqs in endemic
+                                       2 asvs 14 seqs not found at the vent
+                                       
+                                       
+
+#Obazoa
+
+```{r}
+Obazoa_all <- new_MCR %>% 
+  filter(Supergroup == "Obazoa") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(Obazoa_all, file = "~/Documents/GitHub/MCR_Updated_Data/Obazoa_All_by_level.csv")
+```
+
+```{r}
+Obazoa_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Obazoa") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(Obazoa_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Obazoa_Putatively_Endemic_by_level.csv")
+```
+
+                                      
+
+#Provora
+
+```{r}
+Provora_all <- new_MCR %>% 
+  filter(Supergroup == "Provora") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(Provora_all, file = "~/Documents/GitHub/MCR_Updated_Data/Provora_All_by_level.csv")
+```
+
+
+```{r}
+Provora_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "Provora") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(Provora_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/Provora_Putatively_Endemic_by_level.csv")
+```
+
+
+
+#TSAR
+
+```{r}
+TSAR_all <- new_MCR %>% 
+  filter(Supergroup == "TSAR") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(value))
+
+write.csv(TSAR_all, file = "~/Documents/GitHub/MCR_Updated_Data/TSAR_All_by_level.csv")
+```
+
+
+```{r}
+TSAR_put_endemic <- new_endemic_taxa_table %>% 
+  filter(Supergroup == "TSAR") %>% 
+  tidyr::unite(SUPERGROUP_PHYLUM, Supergroup, Phylum, sep = ": ", remove = FALSE) %>% 
+  tidyr::unite(PHYLUM_CLASS, Phylum, Class, sep = ": ", remove = FALSE) %>% 
+    group_by(SUPERGROUP_PHYLUM, PHYLUM_CLASS, Species_Annotation) %>% 
+  summarise(total_asvs = n(),
+            total_sequences = sum(Vent))
+
+write.csv(TSAR_put_endemic, file = "~/Documents/GitHub/MCR_Updated_Data/TSAR_Putatively_Endemic_by_level.csv")
+```
+
+
+```{r}
+coordinates <- new_MCR %>%
+  separate(COORDINATES, into = c("Latitude", "Longitude"), sep = ", ", convert = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Page Break 
+
+## Utilize Phyloseq
+
+## Modify metadata
+```{r}
+deepsea_metadata_mod <- filter(deepsea_metadata, grepl("MCR", SAMPLE))
+```
+
+
+```{r}
+  ## Extract relevant metadata information
+deepsea_metadata_formatted <- deepsea_metadata_mod %>% 
+  mutate_all(as.character) %>%
+  select(SAMPLE, VENT, COORDINATES, SITE, SAMPLEID, DEPTH, SAMPLETYPE, YEAR, TEMP = starts_with("TEMP"), pH, PercSeawater = starts_with("Perc"), Mg = starts_with("Mg"), H2 = starts_with("H2."), H2S = starts_with("H2S"), CH4 = starts_with("CH4"), ProkConc, Sample_or_Control)
+
+# Ensure these columns are converted to numeric
+deepsea_env_params <- c("DEPTH", "TEMP", "pH", "PercSeawater", "Mg", "H2", "H2S", "CH4", "ProkConc")
+metadata_insitu <- metadata_formatted %>%
+  na_if(., "bd") %>% na_if(., "nd") %>% na_if(., "-") %>% na_if(., "") %>% na_if(., "na")
+  #filter(SAMPLE %in% insitu_samples) %>% # from reformatting df above
+  # select(SAMPLE, VENT, SITE, SAMPLETYPE, YEAR) %>%
+  unite(SAMPLELABEL, VENT, SITE, SAMPLETYPE, YEAR, sep = "_", remove = FALSE) %>% 
+  unite(TYPE_SITE, SITE, SAMPLETYPE, sep = "_", remove = FALSE) %>% 
+  mutate_at(env_params,as.numeric)
+```
+
+
+```{r}
+new_physeq_metadata <- sample_data(deepsea_metadata_mod %>% column_to_rownames(var = "SAMPLE"))
+```
+
+Transform Data: Tax Table
+```{r}
+new_all_taxon <- new_MCR %>%
+  dplyr::select(FeatureID, Domain, Supergroup, Phylum, Class, Order, Family, Genus, Species,) %>% distinct() %>% column_to_rownames(var = "FeatureID") %>%
+as.matrix
+```
+
+
+Transform Data: OTU Table
+```{r}
+new_all_asvs <- new_MCR %>% 
+  dplyr::select(FeatureID, SAMPLE,value)
+```
+
+
+```{r}
+new_all_asvs_matrix <- pivot_wider(new_all_asvs, names_from = SAMPLE, values_from = value, values_fill = 0) %>%
+column_to_rownames(var = "FeatureID") %>% as.matrix
+#asvs_wide[is.na(asvs_wide)] <- 0
+
+```
+
+```{r}
+new_all_taxa = tax_table(new_all_taxon)
+```
+
+```{r}
+new_all_otu_asvs = otu_table(new_all_asvs_matrix, taxa_are_rows = TRUE)
+```
+
+```{r}
+# Check the class and structure of your data
+class(new_all_otu_asvs)
+str(new_all_otu_asvs)
+
+```
+
+```{r}
+head(new_all_asvs_matrix)
+str(new_otu_table)
+```
+
+```{r}
+new_all_physeq_object <- merge_phyloseq(new_all_otu_asvs, new_all_taxa, new_physeq_metadata)
+```
+
+```{r}
+estimate_richness(new_all_physeq_object, measures = c("Shannon", "Simpson"))
+```
+
+# Plot of Shannon and Simpson Diversity
+```{r}
+plot_richness(new_all_physeq_object, "SAMPLETYPE", "SITE", "VENT", measures=c("Simpson", "Shannon"), nrow=3) + scale_shape_manual(values = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) + theme(plot.title = element_text(size = 18, hjust = 0.5)) + theme(axis.text.x = element_text(angle = 40, hjust = 1.0, size = 10)) + (labs(title = "Updated_Everything", x = "Sample Type", y = "Alpha Diversity"))
+```
+
+
+
+
+
+## Putatively Endemic 
+
+Transform Data: Tax Table
+```{r}
+new_end_taxon <- new_endemic_taxa_table %>%
+  dplyr::select(FeatureID, Domain, Supergroup, Phylum, Class, Order, Family, Genus, Species,) %>% distinct() %>% column_to_rownames(var = "FeatureID") %>%
+as.matrix
+```
+
+
+Transform Data: OTU Table
+```{r}
+new_end_asvs <- new_endemic_taxa_table %>% 
+  dplyr::select(FeatureID, SAMPLE,Vent)
+```
+
+
+```{r}
+new_end_asvs_matrix <- pivot_wider(new_end_asvs, names_from = SAMPLE, values_from = Vent, values_fill = 0) %>%
+column_to_rownames(var = "FeatureID") %>% as.matrix
+#asvs_wide[is.na(asvs_wide)] <- 0
+
+```
+
+```{r}
+new_end_taxa = tax_table(new_end_taxon)
+```
+
+```{r}
+new_end_otu_asvs = otu_table(new_end_asvs_matrix, taxa_are_rows = TRUE)
+```
+
+
+```{r}
+# Check the class and structure of your data
+class(new_end_otu_asvs)
+str(new_end_otu_asvs)
+
+```
+
+```{r}
+head(new_end_asvs_matrix)
+str(new_otu_table)
+```
+
+```{r}
+new_end_physeq_object <- merge_phyloseq(new_end_otu_asvs, new_end_taxa, new_physeq_metadata)
+```
+
+```{r}
+estimate_richness(new_end_physeq_object, measures = c("Shannon", "Simpson"))
+```
+
+# Plot of Shannon and Simpson Diversity
+```{r}
+plot_richness(new_end_physeq_object, "SAMPLETYPE","SITE", "VENT", measures=c("Simpson", "Shannon"), nrow=3) + scale_shape_manual(values = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) + theme(plot.title = element_text(size = 18, hjust = 0.5)) + theme(axis.text.x = element_text(angle = 40, hjust = 1.0, size = 10)) + (labs(title = "New_Endemic", x = "Sample Type", y = "Alpha Diversity"))
+```
+
+
+```{r}
+new_bray_dist <- phyloseq::distance(new_end_physeq_object, method = "bray")
+```
+
+
+```{r}
+ordination <- ordinate(end_physeq_object, method = "PCoA", distance = bray_dist)
+```
+
+
+```{r}
+plot_ordination(end_physeq_object, ordination, color = "SITE") +
+  geom_point(size = 3) +
+  ggtitle("PCoA - Bray-Curtis Dissimilarity") +
+  theme_minimal()
+
+```
+
+
+```{r}
+MCR.ord <- ordinate(end_physeq_object, method = "PCoA", distance = "bray")
+
+
+end_plot <- plot_ordination(end_physeq_object, MCR.ord, type = "SAMPLE", color = "SITE", title = "PCoA- Bray-Curtis")
+
+print(end_plot)
+```
+
+
+
+```{r}
+#install.packages("reshape2")
+#library(reshape2)
+```
+
+```{r}
+#library(radEmu)
+```
+
+
+```{r}
+new_bc_dist <- phyloseq::distance(new_end_physeq_object, method = "bray")
+```
+
+
+```{r}
+class(new_bc_dist)
+```
+
+```{r}
+rownames(as.data.frame(as.matrix(new_bc_dist)))
+head(as.data.frame(as.matrix(new_bc_dist)))
+```
+
+```{r}
+new_bc_df <- (as.data.frame(as.matrix(new_bc_dist))) %>% 
+  rownames_to_column(var = "SAMPLEID") %>% 
+    pivot_longer(
+    cols = -SAMPLEID,         # keep SampleID as the row identifier (this becomes Sample1)
+    names_to = "SAMPLE_B",     # the column names become Sample2
+    values_to = "Dissimilarity" # the values go into this new column
+  ) %>%
+  rename(Sample_A = SAMPLEID)
+ 
+```
+
+
+```{r}
+red_darkred <- c("red", "darkred")
+```
+
+
+# Correlation Dot Plot: Endemic
+```{r}
+ggplot(bc_df, aes(x = Sample_A, y = SAMPLE_B, fill = Dissimilarity, size = Dissimilarity)) +
+  geom_point(shape = 21, color = "black") + scale_x_discrete(position = "top") +
+  scale_fill_viridis_c() + theme(axis.text.x = element_text(angle = 90, hjust = 1.0)) + theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray"),
+    panel.grid.minor = element_line(color = "gray")
+  ) + labs(title = "Putatively Endemic Correlation Dot Plot") +
+scale_fill_stepsn(colors = red_darkred, breaks = c(0.2, 0.4, 0.6, 0.8, 1)) 
+```
+# Correlation Dot Plot: Everything
+```{r}
+all_bray_dist <- phyloseq::distance(all_physeq_object, method = "bray")
+rownames(as.data.frame(as.matrix(all_bray_dist)))
+head(as.data.frame(as.matrix(all_bray_dist)))
+all_bc_df <- (as.data.frame(as.matrix(all_bray_dist))) %>% 
+  rownames_to_column(var = "SAMPLEID") %>% 
+    pivot_longer(
+    cols = -SAMPLEID,         # keep SampleID as the row identifier (this becomes Sample1)
+    names_to = "SAMPLE_B",     # the column names become Sample2
+    values_to = "Dissimilarity" # the values go into this new column
+  ) %>%
+  rename(Sample_A = SAMPLEID)
+ggplot(all_bc_df, aes(x = Sample_A, y = SAMPLE_B, fill = Dissimilarity, size = Dissimilarity)) +
+  geom_point(shape = 21, color = "black") + scale_x_discrete(position = "top") +
+  scale_fill_viridis_c() + theme(axis.text.x = element_text(angle = 90, hjust = 1.0)) + theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "gray"),
+    panel.grid.minor = element_line(color = "gray")
+  ) + labs(title = "Correlation Dot Plot: Everything") + scale_fill_stepsn(colors = c("white", "lightblue", "dodgerblue", "darkblue"))
+
+```
+Dissimilarity of 1.00
+63 compared to 80, 78, 77, 76, 72, 71, 70, 69, 67
+65 compared to 80, 78, 77, 76, 74, 72, 71, 70, 69, 67
+66 compared to 78, 77, 76, 74, 73, 72, 71, 70, 69, 67
+67 compared to 80, 78, 77, 76, 74, 73, 71, 70, 69,
+69 compared to 80, 78, 77, 76, 74 73, 72, 71, 70
+70 compared to 78, 77, 76, 74, 73, 72, 71
+71 compared to 80, 78, 77, 76, 74, 73, 72
+72 compared to 78, 77, 74, 72
+73 compared to 80, 78, 77, 76
+74 compared to 80, 78, 77, 76
+76 compared to 80, 78, 77
+77 compared to 78
+78 compared to 80
+
+Dissimilarity of 0.75
+63 compared to 74, 73, 66
+65 compared to 66
+66 compared to 80
+67 compared to 72
+72 compared to 67, 80 
+77 compared to 80
+
+Dissimilarity of 0.50
+70 compared to 80
+72 compared to 76
+73 compared to 74
+
+
+
+```{r}
+str(bc_df)
+```
+
+```{r}
+# install.packages("devtools")
+#devtools::install_github("statdivlab/radEmu")
+#library(radEmu)
+```
+
+# All: Class Level Heat Map
+```{r}
+all_class <- tax_glom(all_physeq_object, taxrank = "Class")
+plot_heatmap(all_class, method = "NMDS", distance = "bray", sample.label = "VENT", taxa.label = "Class") + 
+theme(plot.title = element_text(size = 16, hjust = 0.5)) + theme(axis.text.x = element_text(angle = 40, hjust = 1.0, size = 10)) + (labs(title = "Heat Map Everything"))
+```
+
+
+ # Endemic Class Level Heat Map
+```{r}
+end_class <- tax_glom(end_physeq_object, taxrank = "Class")
+plot_heatmap(end_class, method = "NMDS", distance = "bray", sample.label = "VENT", taxa.label = "Class") + theme(plot.title = element_text(size = 16, hjust = 0.5)) + theme(axis.text.x = element_text(angle = 40, hjust = 1.0, size = 10)) + (labs(title = "Heat Map Endemic"))
+```
+# Venn Diagram- parse out data
+```{r}
+pa_everything <- Everything %>% 
+mutate(
+    Background = case_when(SAMPLETYPE == "Background" & value > 0 ~ 1, TRUE ~ 0),
+    Plume = case_when(SAMPLETYPE == "Plume" & value > 0 ~ 1, TRUE ~ 0),
+    Vent = case_when(SAMPLETYPE == "Vent" & value > 0 ~ 1, TRUE ~ 0)
+  ) 
+```
+
+# Install ggVennDiagram
+```{r}
+install.packages("ggVennDiagram")
+```
+
+```{r}
+library(ggVennDiagram)
+```
+
+```{r}
+RColorBrewer::display.brewer.all()
+```
+
+# Venn Diagram Plotted
+```{r}
+Gems <- list(
+  Background = pa_everything %>% filter(Background == 1) %>% pull(FeatureID),
+  Plume = pa_everything %>% filter(Plume == 1) %>% pull(FeatureID),
+  Vent = pa_everything %>% filter(Vent == 1) %>% pull(FeatureID)
+)
+
+ggVennDiagram(Gems) +
+  scale_fill_gradient(low = "white", high = "#2f2585") +
+  theme_minimal() + theme(
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  ) + theme(plot.title = element_text(size = 16, hjust = 0.5)) + labs(title = "Venn Diagram of Individual and Shared ASVs Across Sample Types") 
+```
+
+
+```{r}
+
+```
+
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
