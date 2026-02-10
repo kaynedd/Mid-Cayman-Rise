@@ -1,0 +1,208 @@
+---
+title: "SILVA_stuff"
+author: "Kayla A. Nedd"
+date: "2026-01-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(tibble)
+library(lattice)
+library(paletteer)
+library(phyloseq)
+#library(pheatmap)
+library(vegan)
+library(ggvenn)
+```
+
+
+```{r}
+load("~/Documents/GitHub/MCR_Updated_Data/silva_deepsea_asv_table.RData", verbose = TRUE)
+```
+
+
+# SILVA stuff
+
+```{r}
+
+  separate(Taxon, c("Domain","Phylum", "Class", "Order",
+                    "Family", "Genus", "Species"), sep = ";", remove = FALSE)
+```
+
+```{r}
+#Import SILVA taxonomy
+SILVA_taxonomy <- read.delim("~/Documents/GitHub/HPRC_data/taxonomy_SILVA.tsv")
+
+df_SILVA_taxonomy <- rename(SILVA_taxonomy, `FeatureID` = `Feature.ID`) %>% 
+  separate(Taxon, c("Domain","Phylum", "Class", "Order",
+                    "Family", "Genus", "Species"), sep = ";", remove = FALSE)
+```
+
+
+```{r}
+silva_taxa <- df_SILVA_taxonomy %>% 
+  select(FeatureID, Domain, Phylum, Class, Order, Family, Genus, Species)
+```
+
+
+```{r}
+new_mergeSILVA2 <- full_join(new_merged, silva_taxa, by = "FeatureID")
+
+new_mergeSILVA3 <- new_mergeSILVA2 %>% 
+ # mutate(taxon_final = if_else(is.na(Taxon.x), Taxon.y, Taxon.x)) %>% 
+  mutate(domain_final = if_else(is.na(Domain.x), Domain.y, Domain.x)) %>% 
+  mutate(phylum_final = if_else(is.na(Phylum.x), Phylum.y, Phylum.x)) %>% 
+  mutate(class_final = if_else(is.na(Class.x), Class.y, Class.x)) %>% 
+  mutate(order_final = if_else(is.na(Order.x), Order.y, Order.x)) %>% 
+    mutate(family_final = if_else(is.na(Family.x), Family.y, Family.x)) %>% 
+  mutate(genus_final = if_else(is.na(Genus.x), Genus.y, Genus.x)) %>%
+  mutate(species_final = if_else(is.na(Species.x), Species.y, Species.x))
+```
+
+
+```{r}
+new_mergeSILVA4 <- new_mergeSILVA3 %>% 
+  select(FeatureID, SAMPLE, domain_final, supergroup_final, phylum_final, class_final, order_final, family_final, genus_final, species_final, LOCATION, SITE, SAMPLETYPE, DEPTH, DEPTH_CATEGORY, FLUID_COLLECTION, vent_endemic, filter, VentField, total_sequences, merged_sampleid)
+```
+
+
+```{r}
+vent_asvs <- new_mergeSILVA4 %>%
+  group_by(FeatureID) %>%
+  filter(n_distinct(SAMPLETYPE) == 1, SAMPLETYPE == "vent") %>%
+  ungroup()
+
+test_vent_asvs_info <- new_merged %>%
+  filter(SAMPLETYPE == "vent") %>% 
+  group_by(FeatureID) %>%
+  summarise(
+    also_in_other_st = any(SAMPLETYPE != "vent")
+  ) %>%
+  ungroup()
+
+
+silva_asvs_info <- new_mergeSILVA4 %>%
+  group_by(FeatureID) %>%
+  summarise(
+    in_vent= any(SAMPLETYPE == "vent"),
+    also_in_other_st = any(SAMPLETYPE != "vent")
+  ) %>%
+  filter(in_vent) %>%  # keep only ASVs present in Lake
+  ungroup()
+
+silva_asvsInfor <- silva_asvs_info %>% 
+  filter(also_in_other_st == FALSE)
+
+length(unique(silva_asvsInfor$FeatureID))
+
+silventonly_asv <- new_mergeSILVA4 %>% left_join(silva_asvsInfor) %>% 
+  drop_na(in_vent)
+
+length(unique(silventonly_asv$FeatureID))
+
+#asvs_vent <- asvs_info %>%
+#  mutate(
+ #   status = case_when(
+  #    in_vent & !also_in_other_st ~ "vent only",
+   #   in_vent &  also_in_other_st ~ "nonvent",
+   #   TRUE                           ~ "nonvent"
+   # )
+ # )
+
+silvasvs_vent <- silva_asvs_info %>%
+  mutate(
+    status = case_when(
+      is.na(in_vent) == TRUE ~ "vent",
+      in_vent == TRUE & also_in_other_st == FALSE ~ "resident",
+      in_vent == TRUE & also_in_other_st == TRUE ~ "cosmopolitan",
+      in_vent == FALSE ~ "cosmopolitan"
+    )
+  )
+
+length(unique(asvs_vent$FeatureID))
+
+silva_actual <- new_mergeSILVA4 %>% left_join(silvasvs_vent) %>% 
+  mutate(status = case_when(SAMPLETYPE %in% c("plume", "background") ~ "cosmopolitan",
+      TRUE ~ status))
+```
+
+
+
+
+```{r}
+class_silva <- new_mergeSILVA4 %>%
+  mutate(Species_Annotation = ifelse(is.na(species_final), "Unknown_Annotation", species_final)) %>%
+  unite(PHYLUM_CLASS, phylum_final, class_final, sep = ": ", remove = FALSE) %>%
+  group_by(PHYLUM_CLASS, FeatureID) %>%
+  summarise(total_sequences = sum(total_sequences, na.rm = TRUE),
+            Species_Annotation = first(Species_Annotation),
+            .groups = "drop") %>%
+  group_by(PHYLUM_CLASS) %>%
+  summarise(
+    everything_total_asvs = n_distinct(FeatureID),
+    everything_total_sequences = sum(total_sequences, na.rm = TRUE),
+    amount_all_asvs_NAs = sum(Species_Annotation == "Unknown_Annotation"),
+    amount_all_seqs_NA = sum(total_sequences[Species_Annotation == "Unknown_Annotation"], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+class_silva_vent <- silventonly_asv %>%
+  mutate(Species_Annotation = ifelse(is.na(species_final), "Unknown_Annotation", species_final)) %>%
+  unite(PHYLUM_CLASS, phylum_final, class_final, sep = ": ", remove = FALSE) %>%
+  group_by(PHYLUM_CLASS, FeatureID) %>%
+  summarise(total_sequences = sum(total_sequences, na.rm = TRUE),
+            Species_Annotation = first(Species_Annotation),
+            .groups = "drop") %>%
+  group_by(PHYLUM_CLASS) %>%
+  summarise(
+    endemic_total_asvs = n_distinct(FeatureID),
+    endemic_total_sequences = sum(total_sequences, na.rm = TRUE),
+    amount_end_asvs_NAs = sum(Species_Annotation == "Unknown_Annotation"),
+    amount_end_seqs_NA = sum(total_sequences[Species_Annotation == "Unknown_Annotation"], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+class_silva_end_ev <- class_silva %>%
+  left_join(class_silva_vent, by = "PHYLUM_CLASS")
+
+total_seqs <- sum(class_silva_end_ev$everything_total_sequences)
+total_asvs <- sum(class_silva_end_ev$everything_total_asvs)
+
+class_math_silva_end_ev <- class_silva_end_ev %>%
+  mutate(percent_endemic_asvs = endemic_total_asvs / everything_total_asvs) %>% 
+  mutate(percent_endemic_seqs = endemic_total_sequences / everything_total_sequences) %>% 
+  mutate(percent_NA_end_asvs = amount_end_asvs_NAs / endemic_total_asvs) %>% 
+  mutate(percent_NA_all_asvs = amount_all_asvs_NAs / everything_total_asvs) %>% 
+  mutate(percent_NA_end_seqs = amount_end_seqs_NA / endemic_total_sequences) %>% 
+  mutate(percent_NA_all_seqs = amount_all_seqs_NA / everything_total_sequences) %>% 
+  mutate(percent_all_asvs_of_total = everything_total_asvs / total_asvs) %>% 
+  mutate(percent_all_seqs_of_total = everything_total_sequences / total_seqs) 
+
+class_silva_end_ev_combined_table <- class_math_silva_end_ev %>% 
+  dplyr::select(PHYLUM_CLASS,everything_total_asvs, endemic_total_asvs, everything_total_sequences, endemic_total_sequences, amount_all_asvs_NAs, amount_end_asvs_NAs, amount_all_seqs_NA, amount_end_seqs_NA, percent_endemic_asvs, percent_endemic_seqs, percent_NA_end_asvs, percent_NA_all_asvs, percent_NA_end_seqs, percent_NA_all_seqs,percent_all_asvs_of_total, percent_all_seqs_of_total)
+
+# --- Step 5: Safety check ---
+#stopifnot(all(class_math_silva_end_ev$percent_endemic_seqs <= 1))
+
+# --- Step 6: View and save ---
+view(class_math_silva_end_ev)
+write_csv(class_silva_end_ev_combined_table, "~/Documents/GitHub/AXMCR/SILVA_class_math_end_ev.csv")
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
