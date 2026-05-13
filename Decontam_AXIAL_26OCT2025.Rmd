@@ -1,0 +1,165 @@
+---
+title: "Decontam"
+author: "Kayla A. Nedd"
+date: "2025-10-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# Import data
+deepsea_18S_merged_asv <- read.delim("~/Documents/GitHub/HPRC_data/deepsea-18s-merged-asv-table-05022025.tsv", header = TRUE, sep = "\t", skip = 1) 
+deepsea_18S_PR2_tax <- read.delim("~/Documents/GitHub/HPRC_data/taxonomy_PR2.tsv")
+```
+
+
+```{r}
+deepsea_18S_asv_wtax <- deepsea_18S_merged_asv %>% 
+  select(Feature.ID = 'X.OTU.ID', everything()) %>% 
+  pivot_longer(cols = !Feature.ID, 
+               names_to = "SAMPLE", values_to = "value")%>% 
+  left_join(deepsea_18S_PR2_tax, by = c("Feature.ID" = "Feature.ID")) %>% 
+  separate(Taxon, c("Domain", "Supergroup",
+                    "Phylum", "Class", "Order",
+                    "Family", "Genus", "Species"), sep = ";", remove = FALSE) %>% 
+  filter(value > 0)
+```
+
+
+```{r}
+axial_18S_asv_wtax <- subset(deepsea_18S_asv_wtax, grepl("AXIAL", SAMPLE, ignore.case = TRUE))
+GordaRidge_18S_asv_wtax <- subset(deepsea_18S_asv_wtax, grepl("GordaRidge", SAMPLE, ignore.case = TRUE)) 
+MCR_18S_asv_wtax <- subset(deepsea_18S_asv_wtax, grepl("MCR", SAMPLE, ignore.case = TRUE)) 
+```
+
+
+```{r}
+#Save files 
+write.table(MCR_18S_asv_wtax, "~/Documents/GitHub/Mid-Cayman Rise/MCR_18S_asv_wtax.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(GordaRidge_18S_asv_wtax, "~/Documents/GitHub/GR/GordaRidge_18S_asv_wtax.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(axial_18S_asv_wtax, "~/Documents/GitHub/AXMCR/axial_18S_asv_wtax.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+##Decontam
+axial_18S_asv_wtax <- read.delim("~/Documents/GitHub/AXMCR/axial_18S_asv_wtax.tsv", header = TRUE, sep = "\t")
+axial_compiledmetadata <- read.csv("~/Documents/GitHub/Mid-Cayman Rise/axial_compiledmetadata.csv") 
+```
+
+
+```{r}
+axial_18S_compiled <- axial_18S_asv_wtax %>% 
+  mutate(sample_or_control = case_when(
+    grepl("Control", SAMPLE, ignore.case = TRUE) ~ "control",
+    TRUE ~ "Sample")) %>% 
+  left_join(axial_compiledmetadata, by = c("SAMPLE" = "NEW_FASTQ_NAME"))
+#Import datasets as phyloseq objects
+tax_matrix <- axial_18S_compiled %>% select(Feature.ID, Domain, Supergroup, 
+                                            Phylum, Class, Order, Family, Genus, Species) %>% 
+  distinct() %>% column_to_rownames(var = "Feature.ID") %>% as.matrix
+
+asv_matrix <- axial_18S_compiled %>% select(Feature.ID, SAMPLE, value) %>% 
+  pivot_wider(names_from = "SAMPLE", values_fill = 0, values_from = value) %>% 
+  column_to_rownames(var = "Feature.ID") %>% as.matrix
+
+rownames(tax_matrix) <- row.names(asv_matrix)
+
+axial_metadata_cones <- axial_18S_compiled %>% 
+  select(SAMPLE, SAMPLE_TYPE, Location_Name, sample_or_control) %>% 
+  distinct() %>%  column_to_rownames(var = "SAMPLE")
+```
+
+
+```{r}
+#Import asv and tax matrices
+ASV = otu_table(asv_matrix, taxa_are_rows = TRUE)
+TAX = tax_table(tax_matrix)
+phylo_obj <- phyloseq(ASV, TAX)
+
+#Import metadata as sample data in phyloseq
+samplenames <- sample_data(axial_metadata_cones)
+
+#Join as phyloseq object
+physeq_wnames = merge_phyloseq(phylo_obj, samplenames)
+
+#Identify contaminant ASVs
+# When "Control" appears in "Sample_or_Control column, this is a negative control"
+sample_data(physeq_wnames)$is.neg <- sample_data(physeq_wnames)$sample_or_control == "control"
+```
+
+
+```{r}
+#ID contaminants using Prevalence information
+contam_prev <- isContaminant(physeq_wnames, 
+                             method="prevalence", 
+                             neg="is.neg", 
+                             threshold = 0.5, normalize = TRUE) 
+
+# Report number of ASVs IDed as contamintants
+table(contam_prev$contaminant)
+# FALSE 15512
+# TRUE 648
+```
+
+
+```{r}
+##Remove problematic ASVs
+#Subset contaminant ASVs
+contams <- filter(contam_prev, contaminant == "TRUE")
+list_of_contam_asvs <- as.character(row.names(contams))
+
+taxa_contam <- as.data.frame(tax_matrix) %>% 
+  rownames_to_column(var = "Feature.ID") %>% 
+  filter(Feature.ID %in% list_of_contam_asvs)
+
+#View
+axial_asv_wtax_decon <- axial_18S_compiled %>% 
+  filter(!(Feature.ID %in% list_of_contam_asvs)) %>% 
+  filter(!(sample_or_control == "control"))
+
+tmp_orig <- (axial_18S_compiled %>% filter(!(sample_or_control == "control")))
+
+#Stats on lost ASVs
+x <- length(unique(tmp_orig$Feature.ID)); x
+y <- length(unique(axial_asv_wtax_decon$Feature.ID)); y
+100*((y-x)/x) #4.1% of ASVs lost
+a <- sum(tmp_orig$value);a #6.67 million
+b <- sum(axial_asv_wtax_decon$value);b #5.71 million 
+100*((b-a)/a)
+# Lost 13.8% of sequences from whole dataset.
+## Subsample to clean ASVs
+axial_asv_wtax_wstats <- axial_18S_compiled %>% 
+  mutate(DECONTAM = case_when(
+    Feature.ID %in% list_of_contam_asvs ~ "FAIL",
+    TRUE ~ "PASS"
+  ))
+```
+
+
+```{r}
+axial_18S_asv_FinalProduct <- axial_asv_wtax_wstats %>% 
+  filter(sample_or_control == "Sample") %>% 
+  filter(DECONTAM == "PASS") %>% 
+  select(SAMPLE, Feature.ID, value, Taxon, Domain, Supergroup, Phylum, 
+         Class, Order, Family, Genus, Species, Location_Name, SAMPLE_TYPE, DEPTH_CATEGORY, DEPTH, PRIMER, FLUID_COLLECTION, AXIAL.YEAR, EXPERIMENT, DOC..um., POC..um., TDN.um., Prok_min, Prok_mid, Prok_mid2, Prok_max, Prok_avg)
+
+save(axial_18S_asv_FinalProduct, file = "~/Documents/GitHub/AXMCR/axial_18S_asv_FinalProduct.RData")
+#write.csv(axial_18S_asv_FinalProduct, file = "~/Documents/GitHub/AXMCR/axial_18S_asv_FinalProduct.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
